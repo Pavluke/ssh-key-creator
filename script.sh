@@ -1,129 +1,104 @@
 #!/bin/bash
 
-# Скрипт для настройки SSH-подписей коммитов в Git на macOS
-# Запрашивает: Git имя, Git email, название сервиса (default: github)
-# Генерирует ключ, настраивает Git, добавляет в ssh-agent, создает ~/.ssh/config
-# Автоматически обновляет allowed_signers.pub
-# Хост: для github - github.com, gitlab - gitlab.com, иначе запрашивает кастомный хост
-# Юзер: git по умолчанию
-# Порт: запрашивает, по умолчанию пустой (стандартный 22)
+echo "Добро пожаловать в скрипт настройки SSH-ключей для Git (auth + signing)!"
 
-echo "Добро пожаловать в скрипт настройки SSH-подписей для Git!"
-
-# Запрос Git имени
+# --- Git данные ---
 read -p "Введите Git имя (user.name, например 'GitUser'): " git_name
-if [ -z "$git_name" ]; then
-    echo "Ошибка: Имя не может быть пустым."
-    exit 1
-fi
+[ -z "$git_name" ] && { echo "Ошибка: Имя не может быть пустым."; exit 1; }
 
-# Запрос Git email
 read -p "Введите Git email (user.email, например 'user@mail.ru'): " git_email
-if [ -z "$git_email" ]; then
-    echo "Ошибка: Email не может быть пустым."
-    exit 1
-fi
+[ -z "$git_email" ] && { echo "Ошибка: Email не может быть пустым."; exit 1; }
 
-# Запрос названия сервиса
+# --- Сервис/хост ---
 read -p "Введите название сервиса (default: github): " service
 service=${service:-github}
 
-# Запрос суффикса для имени ключа
-read -p "Введите суффикс для имени ключа (default: sign, например sign или auth): " key_suffix
-key_suffix=${key_suffix:-sign}
-
-# Определение хоста на основе сервиса
 if [ "$service" = "github" ]; then
     host="github.com"
 elif [ "$service" = "gitlab" ]; then
     host="gitlab.com"
 else
     read -p "Введите кастомный хост (например git.softlex.pro): " host
-    if [ -z "$host" ]; then
-        echo "Ошибка: Хост не может быть пустым."
-        exit 1
-    fi
+    [ -z "$host" ] && { echo "Ошибка: Хост не может быть пустым."; exit 1; }
 fi
 
-# Запрос порта (по умолчанию пустой)
+# --- Порт ---
 read -p "Введите порт (default: пустой для 22, например 2222): " port
 
-# Генерация SSH-ключа
-key_name="id_ed25519_${key_suffix}_$service"
-key_path="$HOME/.ssh/$key_name"
-ssh-keygen -t ed25519 -C "$git_email" -f "$key_path"
-if [ $? -ne 0 ]; then
-    echo "Ошибка при генерации ключа."
-    exit 1
-fi
+# --- Пути к ключам ---
+auth_key="$HOME/.ssh/id_ed25519_auth_$service"
+sign_key="$HOME/.ssh/id_ed25519_sign_$service"
 
-# Показ публичного ключа для добавления в сервис
-pub_key="$key_path.pub"
-echo "Скопируйте следующий публичный ключ и добавьте в настройки сервиса ($service):"
-cat "$pub_key"
-echo ""
-echo "Для GitHub: Settings → SSH and GPG Keys → New SSH Key"
-echo "Для GitLab: Settings → SSH Keys"
-echo "Нажмите Enter после добавления..."
-read -r
+# --- Генерация ключей ---
+ssh-keygen -t ed25519 -C "$git_email" -f "$auth_key"
+ssh-keygen -t ed25519 -C "$git_email" -f "$sign_key"
 
-# Настройка allowed_signers.pub
+[ $? -ne 0 ] && { echo "Ошибка при генерации ключей."; exit 1; }
+
+# --- Вывод публичных ключей ---
+echo "Добавьте эти публичные ключи в сервис ($service):"
+echo "--- AUTH ключ (для подключения): ---"
+cat "${auth_key}.pub"
+echo "--- SIGNING ключ (для подписей): ---"
+cat "${sign_key}.pub"
+read -p "Нажмите Enter после добавления ключей..."
+
+# --- allowed_signers.pub ---
 allowed_dir="$HOME/.ssh/git-allowed-signers"
 allowed_file="$allowed_dir/allowed_signers.pub"
 mkdir -p "$allowed_dir"
 
-# Добавляем ключ в файл в формате "cert-authority ssh-ed25519 KEY email" (cert-authority + содержимое pub_key)
-echo "cert-authority $(cat "$pub_key")" >> "$allowed_file"
+# обновляем/заменяем запись для email
+grep -v "$git_email" "$allowed_file" > "${allowed_file}.tmp" 2>/dev/null || true
+mv "${allowed_file}.tmp" "$allowed_file"
+echo "cert-authority $(cat "${sign_key}.pub")" >> "$allowed_file"
 
-echo "Ключ добавлен в $allowed_file"
+echo "Signing ключ добавлен в $allowed_file"
 
-# Добавление ключа в ssh-agent с Keychain
+# --- ssh-agent ---
 eval "$(ssh-agent -s)"
-ssh-add --apple-use-keychain "$key_path"
-
-# Проверка добавления
+ssh-add --apple-use-keychain "$auth_key"
+ssh-add --apple-use-keychain "$sign_key"
 ssh-add -l
 
-# Настройка Git конфигурации
-git config --global user.name "$git_name"
-git config --global user.email "$git_email"
-git config --global gpg.format ssh
-git config --global user.signingkey "$pub_key"
-git config --global gpg.ssh.allowedSignersFile "$allowed_file"
-git config --global commit.gpgsign true  # Автоматическая подпись
+# --- Git config ---
+read -p "Хотите записать настройки в git config --global? (y/n): " set_git
+if [ "$set_git" = "y" ]; then
+    git config --global user.name "$git_name"
+    git config --global user.email "$git_email"
+    git config --global gpg.format ssh
+    git config --global user.signingkey "${sign_key}.pub"
+    git config --global gpg.ssh.allowedSignersFile "$allowed_file"
+    git config --global commit.gpgsign true
+    echo "Git config обновлён."
+else
+    echo "Git config пропущен."
+fi
 
-# Создание/обновление ~/.ssh/config
+# --- SSH config ---
 ssh_config="$HOME/.ssh/config"
 touch "$ssh_config"
 
-# Добавляем или обновляем секцию Host
 if grep -q "Host $host" "$ssh_config"; then
-    echo "Обновляем существующую секцию Host $host в $ssh_config"
-    # Удаляем старую секцию (простой способ, можно улучшить)
-    sed -i '' "/Host $host/,/^\$/d" "$ssh_config"
-else
-    echo "Добавляем новую секцию Host $host в $ssh_config"
+    echo "⚠️ Найдена секция Host $host в $ssh_config"
+    read -p "Перезаписать её? (y/n): " overwrite
+    if [ "$overwrite" = "y" ]; then
+        sed -i '' "/Host $host/,/^\$/d" "$ssh_config"
+    else
+        echo "Секция сохранена как есть."
+        exit 0
+    fi
 fi
 
-# Добавляем новую секцию
-echo "" >> "$ssh_config"
-echo "Host $host" >> "$ssh_config"
-echo "  User git" >> "$ssh_config"
-if [ -n "$port" ]; then
-    echo "  Port $port" >> "$ssh_config"
-fi
-echo "  IdentityFile $key_path" >> "$ssh_config"
-echo "  AddKeysToAgent yes"
-echo "  UseKeychain yes"
-
-# Проверка подключения
-echo "Проверяем соединение: ssh -T git@$host"
-if [ -n "$port" ]; then
-    ssh -T git@$host -p "$port"
-else
-    ssh -T git@$host
-fi
+# Добавляем секцию только с signing ключом
+{
+    echo ""
+    echo "Host $host"
+    echo "  User git"
+    [ -n "$port" ] && echo "  Port $port"
+    echo "  IdentityFile $sign_key"
+    echo "  AddKeysToAgent yes"
+    echo "  UseKeychain yes"
+} >> "$ssh_config"
 
 echo "Настройка завершена!"
-echo "Теперь настройте remote в репозитории: git remote set-url origin git@$host:username/repo.git"
-echo "Тестируйте коммит: git commit --allow-empty -m 'Test commit'"
